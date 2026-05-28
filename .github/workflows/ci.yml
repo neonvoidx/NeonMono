@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+permissions:
+  id-token: write
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: neonvoidx
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - run: nix build .#default --no-link -L
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and tag
+        id: tag
+        uses: anothrNick/github-tag-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+          INITIAL_VERSION: "0.1.0"
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          logger: pretty
+          extra-conf: |
+            extra-experimental-features = nix-command flakes
+
+      - name: Build and package
+        run: |
+          set -euxo pipefail
+          nix build .#default --print-build-logs || { echo "Build failed"; exit 1; }
+
+          if [[ ! -d "./result/share/fonts/truetype" ]]; then
+            echo "Error: Expected directory './result/share/fonts/truetype' not found"
+            ls -R ./result || echo "No build results found"
+            exit 1
+          fi
+
+          echo "Creating artifact: NeonMono.zip"
+          zip -vr9 NeonMono.zip ./result/share/fonts/truetype || { echo "Failed to create zip"; exit 1; }
+
+          if [[ ! -f "NeonMono.zip" ]]; then
+            echo "Error: NeonMono.zip was not created"
+            ls -l
+            exit 1
+          fi
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./NeonMono.zip
+          asset_name: NeonMono.zip
+          tag: ${{ steps.tag.outputs.new_tag }}
+          overwrite: true
